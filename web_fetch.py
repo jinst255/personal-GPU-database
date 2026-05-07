@@ -17,7 +17,6 @@ import json
 import time
 import html
 import hashlib
-import codecs
 from urllib.request import urlopen, Request, build_opener, HTTPCookieProcessor
 from urllib.parse import quote, urlencode, urljoin, urlparse, unquote
 from urllib.error import URLError, HTTPError
@@ -352,8 +351,8 @@ def _find_tpu_url(gpu_name):
     if cached:
         return cached
 
-    # Search TechPowerUp directly via their search
-    search_q = f"site:techpowerup.com/gpu-specs {gpu_name}"
+    # Search for the GPU on TechPowerUp
+    search_q = f"{gpu_name} techpowerup gpu specs"
     results = search(search_q)
     for title, url in results:
         if "techpowerup.com/gpu-specs/" in url:
@@ -367,154 +366,442 @@ def _find_tpu_url(gpu_name):
     return None
 
 
-def parse_tpu_specs(html_content):
-    """Parse TechPowerUp GPU specs page into a dict of key-value pairs."""
+def _parse_tpu_og_description(html_content):
+    """Parse specs from TechPowerUp's og:description meta tag.
+
+    Format: "NVIDIA AD102, 2520 MHz, 16384 Cores, 512 TMUs, 176 ROPs,
+             24576 MB GDDR6X, 1313 MHz, 384 bit"
+    Also extracts name from og:title.
+    """
     specs = {}
 
-    # Extract the GPU name from the page title
-    title_match = re.search(r"<h1[^>]*class=\"[^\"]*gpu-name[^\"]*\"[^>]*>(.*?)</h1>", html_content, re.DOTALL)
-    if not title_match:
-        title_match = re.search(r"<title>(.*?)</title>", html_content, re.DOTALL)
+    # Extract title
+    title_match = re.search(r'property="og:title"[^>]*content="([^"]*)"', html_content)
     if title_match:
-        specs["name"] = re.sub(r"<[^>]+>", "", title_match.group(1)).strip()
-        # Clean up title suffix
-        specs["name"] = re.sub(r"\s*\|\s*TechPowerUp.*", "", specs["name"])
-        specs["name"] = re.sub(r"\s*Specifications\s*$", "", specs["name"])
+        specs["name"] = title_match.group(1).replace(" Specs", "")
 
-    # TechPowerUp specs are in a <dl> or table with label-value pairs
-    # Pattern 1: <dt>Label</dt><dd>Value</dd>
-    for m in re.finditer(
-        r"<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>",
-        html_content, re.DOTALL
-    ):
-        label = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-        value = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if label and value:
-            specs[label] = value
+    # Extract og:description
+    desc_match = re.search(r'property="og:description"[^>]*content="([^"]*)"', html_content)
+    if not desc_match:
+        return specs
 
-    # Pattern 2: table rows <tr><td>Label</td><td>Value</td></tr>
-    for m in re.finditer(
-        r"<tr[^>]*>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>",
-        html_content, re.DOTALL
-    ):
-        label = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-        value = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if label and value:
-            specs[label] = value
+    desc = desc_match.group(1)
+    parts = [p.strip() for p in desc.split(",")]
 
-    # Pattern 3: TechPowerUp specific - specs in <div class="gpudb-specs-large__..."> blocks
-    for m in re.finditer(
-        r'<div[^>]*class="[^"]*gpudb-specs-large__[^"]*label[^"]*"[^>]*>(.*?)</div>\s*<div[^>]*class="[^"]*gpudb-specs-large__[^"]*value[^"]*"[^>]*>(.*?)</div>',
-        html_content, re.DOTALL
-    ):
-        label = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-        value = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if label and value:
-            specs[label] = value
+    if len(parts) < 3:
+        return specs
 
-    # Pattern 4: Generic key-value pattern in spans/divs
-    for m in re.finditer(
-        r'<span[^>]*class="[^"]*(?:label|key|prop)[^"]*"[^>]*>(.*?)</span>\s*<span[^>]*class="[^"]*(?:value|data)[^"]*"[^>]*>(.*?)</span>',
-        html_content, re.DOTALL
-    ):
-        label = re.sub(r"<[^>]+>", "", m.group(1)).strip()
-        value = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-        if label and value:
-            specs[label] = value
+    specs["og_description_raw"] = desc
 
-    # Try to normalize common fields
-    normalized = {}
-    for label, value in specs.items():
-        ll = label.lower()
+    # First part is GPU chip name (e.g., "NVIDIA AD102")
+    specs["gpu_chip"] = parts[0].strip()
 
-        if any(k in ll for k in ("vram", "memory size", "memory amount")):
-            normalized["vram"] = value
-        elif "memory type" in ll or "memory bus" in ll and "width" not in ll:
-            if "type" in ll:
-                normalized["memory_type"] = value
-        elif "bus width" in ll or "memory bus" in ll:
-            normalized["bus_width"] = value
-        elif "gpu clock" in ll or "base clock" in ll or "core clock" in ll:
-            if "boost" not in ll:
-                normalized["base_clock"] = value
-        elif "boost clock" in ll:
-            normalized["boost_clock"] = value
-        elif "cuda cores" in ll or "shading units" in ll or "stream processors" in ll:
-            normalized["cores"] = value
-        elif "fp32" in ll and ("tflops" in ll or "performance" in ll or "float" in ll):
-            normalized["fp32_tflops"] = value
-        elif "tdp" in ll or "tbp" in ll or "total board power" in ll or "power draw" in ll:
-            normalized["tdp"] = value
-        elif "die size" in ll or "die area" in ll:
-            normalized["die_size"] = value
-        elif "process" in ll and ("size" in ll or "node" in ll or "nm" in ll or "technology" in ll):
-            normalized["process"] = value
-        elif "transistor" in ll or "transistors" in ll or "mosfet" in ll:
-            normalized["transistors"] = value
-        elif "texture mapping" in ll or "tmus" in ll:
-            normalized["tmus"] = value
-        elif "render output" in ll or "rops" in ll:
-            normalized["rops"] = value
-        elif "pixel rate" in ll:
-            normalized["pixel_rate"] = value
-        elif "texture rate" in ll or "texel rate" in ll:
-            normalized["texture_rate"] = value
-        elif "memory bandwidth" in ll or "bandwidth" in ll:
-            normalized["bandwidth"] = value
-        elif "release date" in ll or "launched" in ll:
-            normalized["release_date"] = value
-        elif "architecture" in ll or "gpu" in ll and "variant" in ll:
-            normalized["architecture"] = value
-        elif "pcie" in ll and ("version" in ll or "bus" in ll or "interface" in ll):
-            normalized["pcie_interface"] = value
-        elif "recommended" in ll and "power" in ll:
-            normalized["psu_recommendation"] = value
-        elif "length" in ll or "dimensions" in ll:
-            normalized["dimensions"] = value
-
-    # Merge normalized into the raw specs
-    if normalized:
-        specs["_normalized"] = normalized
+    # Parse remaining parts
+    for part in parts[1:]:
+        part = part.strip()
+        # Clock speed: "2520 MHz" or "1313 MHz"
+        if "MHz" in part:
+            mhz_val = re.search(r'([\d.]+)\s*MHz', part)
+            if mhz_val:
+                mhz = float(mhz_val.group(1))
+                # First MHz is typically GPU clock, second is memory clock
+                if "gpu_clock_mhz" not in specs:
+                    specs["gpu_clock_mhz"] = str(int(mhz))
+                else:
+                    specs["memory_clock_mhz"] = str(int(mhz))
+        # Cores: "16384 Cores"
+        elif "Cores" in part or "cores" in part:
+            specs["cores"] = re.sub(r"[^\d]", "", part.split()[0])
+        # TMUs: "512 TMUs"
+        elif "TMU" in part:
+            specs["tmus"] = re.sub(r"[^\d]", "", part.split()[0])
+        # ROPs: "176 ROPs"
+        elif "ROP" in part:
+            specs["rops"] = re.sub(r"[^\d]", "", part.split()[0])
+        # Memory: "24576 MB GDDR6X" or "24576 MB GDDR6"
+        elif "MB" in part or "GB" in part:
+            mem_match = re.search(r'([\d]+)\s*(MB|GB)\s*(\S+)', part)
+            if mem_match:
+                mem_size = int(mem_match.group(1))
+                mem_unit = mem_match.group(2)
+                mem_type = mem_match.group(3)
+                if mem_unit == "MB":
+                    specs["vram_mb"] = str(mem_size)
+                    specs["vram_gb"] = str(mem_size / 1024)
+                else:
+                    specs["vram_gb"] = str(mem_size)
+                    specs["vram_mb"] = str(mem_size * 1024)
+                specs["memory_type"] = mem_type
+        # Bus width: "384 bit"
+        elif "bit" in part:
+            specs["bus_width"] = re.sub(r"[^\d]", "", part.split()[0]) + " bit"
 
     return specs
 
 
+def _parse_wikipedia_gpu_table(html_content, gpu_name):
+    """Parse GPU specs from Wikipedia tables.
+
+    Strategy: Wikipedia GPU tables have complex multi-row headers and
+    rowspan/colspan merging. Instead of trying to resolve column indices,
+    we find the matching row and extract values by format recognition:
+    - TDP always ends with "W"
+    - Clock speeds have "base(boost)" format
+    - MSRP is a dollar-like number in position 2-3
+    - The last cell is often TDP
+    - We also scan preceding rows for transistors/die size (rowspan shared values)
+    """
+    specs = {}
+    gpu_lower = gpu_name.lower().replace("\xa0", " ").replace("  ", " ")
+
+    # Extract distinctive search terms
+    search_terms = []
+    skip_words = {"geforce", "radeon", "nvidia", "amd", "graphics", "card",
+                  "gpu", "series", "desktop", "laptop"}
+    for word in gpu_lower.split():
+        if len(word) > 2 and word not in skip_words:
+            search_terms.append(word)
+
+    if not search_terms:
+        return specs
+
+    # Build a "must not contain" list to avoid matching variant models
+    # e.g., "RTX 4090" should not match "RTX 4090 D" or "RTX 4090 Ti"
+    gpu_model_id = gpu_lower.replace("geforce ", "").replace("radeon ", "").strip()
+
+    # Find wikitable tables
+    tables = re.findall(
+        r'<table[^>]*class="[^"]*wikitable[^"]*"[^>]*>(.*?)</table>',
+        html_content, re.DOTALL
+    )
+
+    for table_html in tables:
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL)
+        if not rows:
+            continue
+
+        all_parsed_rows = []
+        for row in rows:
+            cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', row, re.DOTALL)
+            cells_text = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+            all_parsed_rows.append(cells_text)
+
+        # Find the best matching row
+        best_idx = None
+        best_score = -1
+        for idx, cells_text in enumerate(all_parsed_rows):
+            if not cells_text:
+                continue
+            row_text = " ".join(cells_text).lower().replace("\xa0", " ")
+
+            if not all(term in row_text for term in search_terms):
+                continue
+            # Skip laptop rows when searching for desktop
+            if "laptop" in row_text and "laptop" not in gpu_lower:
+                continue
+
+            # Check for exact model match in the first cell
+            first_cell = cells_text[0].lower().replace("\xa0", " ")
+            # Clean up reference markers like [81][82]
+            first_cell_clean = re.sub(r'\[.*?\]', '', first_cell).strip()
+
+            # Score: prefer exact matches over partial matches
+            score = 0
+            # Normalize: remove common prefix words for comparison
+            model_in_cell = gpu_model_id.replace(" ", "")
+            cell_cleaned = first_cell_clean.replace(" ", "")
+            # Remove "geforce" and "radeon" prefix for comparison
+            for prefix in ("geforce", "radeon"):
+                if cell_cleaned.startswith(prefix):
+                    cell_cleaned = cell_cleaned[len(prefix):]
+                if model_in_cell.startswith(prefix):
+                    model_in_cell = model_in_cell[len(prefix):]
+
+            if model_in_cell == cell_cleaned:
+                score = 100  # Exact match
+            elif model_in_cell in cell_cleaned:
+                # Partial match - check if there's an extra letter/suffix
+                remainder = cell_cleaned.replace(model_in_cell, "").strip()
+                if not remainder:
+                    score = 90
+                elif remainder in ("ti", "super"):
+                    # Only match Ti/Super variants if explicitly requested
+                    if remainder in gpu_model_id:
+                        score = 95
+                    else:
+                        score = 0
+                else:
+                    # Has additional suffix (D, Laptop, etc.) - lower score
+                    score = 20
+            else:
+                score = 10
+
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        if best_idx is None:
+            continue
+
+        target_idx = best_idx
+
+        if target_idx is None:
+            continue
+
+        cells_text = all_parsed_rows[target_idx]
+
+        # --- Extract by format recognition ---
+
+        # TDP: look for "X W" pattern (often in last cell)
+        for val in reversed(cells_text):
+            clean = re.sub(r'\[.*?\]', '', val).strip()
+            tdp_match = re.match(r'^([\d,.]+(?:\s*[-–]\s*[\d,.]+)?)\s*W$', clean)
+            if tdp_match:
+                specs["tdp"] = tdp_match.group(1).replace(" ", "") + " W"
+                break
+
+        # Clock: "base(boost)" or "base-boost(max)" pattern
+        for val in cells_text:
+            clean = re.sub(r'\[.*?\]', '', val).strip()
+            clock_match = re.match(r'^([\d.]+(?:\s*[-–]\s*[\d.]+)?)\s*\(([\d.]+)\)$', clean)
+            if clock_match:
+                specs["base_clock_mhz"] = clock_match.group(1).replace(" ", "")
+                specs["boost_clock_mhz"] = clock_match.group(2)
+                break
+
+        # MSRP: check all cells for price pattern
+        for i, val in enumerate(cells_text):
+            clean = re.sub(r'\[.*?\]', '', val).strip()
+            # Check for "$XXX USD" or "$XXX" pattern anywhere in the cell
+            msrp_match = re.search(r'\$([\d,]+)\s*(?:USD)?', clean)
+            if msrp_match:
+                specs["msrp"] = msrp_match.group(1)
+                break
+        # If no $ price found, look for standalone price in position 2-4
+        if 'msrp' not in specs:
+            for i, val in enumerate(cells_text):
+                if i < 2:
+                    continue
+                clean = re.sub(r'\[.*?\]', '', val).strip()
+                msrp_match = re.match(r'^(?:[\$¥€])?([\d,]+)(?:\s*\([^)]*([\d,]+)\))?(?:\s*$)', clean)
+                if msrp_match:
+                    dollar_val = msrp_match.group(2) or msrp_match.group(1)
+                    specs["msrp"] = dollar_val
+                    break
+
+        # For transistors and die size, scan nearby rows since these values
+        # are often shared via rowspan from a related variant row.
+        header_row_1 = all_parsed_rows[0] if all_parsed_rows else []
+
+        # Find column indices for transistors and die size from header
+        trans_col = None
+        die_col = None
+        for i, h in enumerate(header_row_1):
+            hl = h.lower()
+            if 'transistor' in hl:
+                trans_col = i
+            elif 'die size' in hl or 'die area' in hl:
+                die_col = i
+
+        # Check if target row has full columns (including trans/die)
+        # The header row has all column definitions; data rows with rowspan
+        # will have fewer cells than the total column count
+        full_column_count = len(header_row_1)
+        target_cell_count = len(cells_text)
+        # If target has fewer cells than the header, it's missing columns due to rowspan
+        has_full_columns = target_cell_count >= full_column_count
+
+        if has_full_columns:
+            # Extract directly from target row
+            if trans_col is not None and trans_col < len(cells_text):
+                val = re.sub(r'\[.*?\]', '', cells_text[trans_col]).strip()
+                try:
+                    v = float(val)
+                    # Validate: transistors should be 0.1-200 billion
+                    if 0.1 <= v <= 200:
+                        specs['transistors_billions'] = val
+                except ValueError:
+                    pass
+            if die_col is not None and die_col < len(cells_text):
+                val = re.sub(r'\[.*?\]', '', cells_text[die_col]).strip()
+                try:
+                    v = float(val)
+                    # Validate: die size should be 50-1000 mm2
+                    if 50 <= v <= 1000:
+                        specs['die_size_mm2'] = val
+                except ValueError:
+                    pass
+        else:
+            # Scan rows above for a row with more cells (shared via rowspan)
+            for scan_idx in range(target_idx - 1, max(0, target_idx - 10), -1):
+                scan_cells = all_parsed_rows[scan_idx]
+                scan_text = " ".join(scan_cells).lower()
+                # Only use rows from the same GPU family
+                if not any(t in scan_text for t in search_terms[:1]):
+                    continue
+                if len(scan_cells) <= len(cells_text):
+                    continue
+
+                if trans_col is not None and trans_col < len(scan_cells) and 'transistors_billions' not in specs:
+                    val = re.sub(r'\[.*?\]', '', scan_cells[trans_col]).strip()
+                    try:
+                        v = float(val)
+                        if 0.1 <= v <= 200:
+                            specs['transistors_billions'] = val
+                    except ValueError:
+                        pass
+                if die_col is not None and die_col < len(scan_cells) and 'die_size_mm2' not in specs:
+                    val = re.sub(r'\[.*?\]', '', scan_cells[die_col]).strip()
+                    try:
+                        v = float(val)
+                        if 50 <= v <= 1000:
+                            specs['die_size_mm2'] = val
+                    except ValueError:
+                        pass
+
+                if 'transistors_billions' in specs and 'die_size_mm2' in specs:
+                    break
+
+        # Extract launch date from position 1 (usually column index 1)
+        if len(cells_text) > 1:
+            launch = re.sub(r'\[.*?\]', '', cells_text[1]).strip()
+            # Handle "Dec 13, 2022$999 USD" pattern (date and price merged)
+            date_match = re.match(r'([A-Z][a-z]+ \d{1,2},? \d{4})', launch)
+            if date_match:
+                specs['launch'] = date_match.group(1)
+            elif re.search(r'\d{4}', launch):
+                specs['launch'] = launch
+
+        # Extract codename from position 3 (usually column index 3)
+        for i, val in enumerate(cells_text):
+            clean = re.sub(r'\[.*?\]', '', val).strip()
+            if re.match(r'^[A-Z][A-Z]\d', clean):  # e.g., "AD102-300"
+                specs['codename'] = clean
+                break
+
+        if specs:
+            return specs
+
+    return specs
+
+
+def _get_wikipedia_url(gpu_name):
+    """Guess the Wikipedia article URL for a GPU series."""
+    n = gpu_name.lower()
+    if "rtx 50" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_50_series"
+    elif "rtx 40" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_40_series"
+    elif "rtx 30" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_30_series"
+    elif "rtx 20" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_20_series"
+    elif "gtx 16" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_16_series"
+    elif "gtx 10" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_10_series"
+    elif "gtx 900" in n or "gtx 9" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_900_series"
+    elif "gtx 700" in n or "gtx 7" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_700_series"
+    elif "gtx 600" in n or "gtx 6" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_600_series"
+    elif "gtx 500" in n or "gtx 5" in n:
+        return "https://en.wikipedia.org/wiki/GeForce_500_series"
+    elif "rx 9070" in n or "rx 9060" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_9000_series"
+    elif "rx 7000" in n or "rx 79" in n or "rx 78" in n or "rx 77" in n or "rx 76" in n or "rx 75" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_7000_series"
+    elif "rx 6000" in n or "rx 69" in n or "rx 68" in n or "rx 67" in n or "rx 66" in n or "rx 65" in n or "rx 64" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_6000_series"
+    elif "rx 5000" in n or "rx 57" in n or "rx 56" in n or "rx 55" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_5000_series"
+    elif "rx 500" in n or "rx 590" in n or "rx 580" in n or "rx 570" in n or "rx 560" in n or "rx 550" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_500_series"
+    elif "rx 400" in n or "rx 480" in n or "rx 470" in n or "rx 460" in n:
+        return "https://en.wikipedia.org/wiki/Radeon_RX_400_series"
+    elif "r9" in n or "r7" in n or "r5" in n:
+        return "https://en.wikipedia.org/wiki/AMD_Radeon_RX_500_series"
+    return None
+
+
 def cmd_techpowerup(gpu_name):
-    """Fetch and display TechPowerUp specs for a GPU."""
+    """Fetch and display TechPowerUp specs for a GPU.
+
+    Since TechPowerUp renders specs via JavaScript, we extract what we can
+    from the og:description meta tag, then supplement with Wikipedia data.
+    """
     # First, try if the user gave a direct URL
     if gpu_name.startswith("http"):
         url = gpu_name
     else:
         url = _find_tpu_url(gpu_name)
         if not url:
-            print(f"Could not find TechPowerUp page for '{gpu_name}'.")
-            print(f"Try searching manually at https://www.techpowerup.com/gpu-specs/")
-            return
+            # Direct URL lookup failed, try TechPowerUp with the GPU name as slug
+            slug = gpu_name.lower().replace(" ", "-")
+            url = f"https://www.techpowerup.com/gpu-specs/{slug}.cXXXX"
+            print(f"Could not find TechPowerUp page for '{gpu_name}'.", file=sys.stderr)
+            print(f"Try searching manually at https://www.techpowerup.com/gpu-specs/", file=sys.stderr)
+            # Still try Wikipedia below
+            url = None
 
-    content = fetch_url(url)
-    if not content:
-        print(f"Failed to fetch {url}")
-        return
+    specs = {}
 
-    specs = parse_tpu_specs(content)
+    # Source 1: TechPowerUp og:description
+    if url:
+        content = fetch_url(url)
+        if content:
+            tpu_specs = _parse_tpu_og_description(content)
+            specs.update(tpu_specs)
+
+    # Source 2: Wikipedia for additional specs (die size, transistors, TDP, etc.)
+    wiki_url = _get_wikipedia_url(gpu_name)
+    if wiki_url:
+        wiki_content = fetch_url(wiki_url)
+        if wiki_content:
+            wiki_specs = _parse_wikipedia_gpu_table(wiki_content, gpu_name)
+            # Wikipedia supplements TPU data (adds die size, transistors, TDP, etc.)
+            for key, val in wiki_specs.items():
+                if key not in specs:
+                    specs[key] = val
+
     if not specs:
-        print(f"Could not parse specs from {url}")
-        print("The page may have changed its structure. Printing raw text:")
-        print(html_to_text(content)[:3000])
+        print(f"Could not find specs for '{gpu_name}' from any source.")
         return
 
-    # Print normalized fields first
-    normalized = specs.pop("_normalized", {})
-    if normalized:
-        print("=== Normalized Specs ===")
-        for key in sorted(normalized.keys()):
-            print(f"  {key}: {normalized[key]}")
-        print()
+    # Print organized output
+    print("=== GPU Specs ===")
+    priority_keys = [
+        "name", "gpu_chip", "codename", "launch", "msrp",
+        "cores", "sm_count", "tmus", "rops", "core_config",
+        "gpu_clock_mhz", "memory_clock_mhz",
+        "vram_gb", "vram_mb", "memory_type", "bus_width", "bandwidth",
+        "transistors", "die_size", "l2_cache",
+        "tdp",
+    ]
 
-    # Print all raw specs
-    print("=== All Specs ===")
+    printed = set()
+    for key in priority_keys:
+        if key in specs:
+            val = specs[key]
+            # Clean up the value
+            val = re.sub(r'\[.*?\]', '', val).strip()
+            if val:
+                print(f"  {key}: {val}")
+                printed.add(key)
+
+    # Print remaining keys
     for key in sorted(specs.keys()):
-        print(f"  {key}: {specs[key]}")
+        if key not in printed and key != "og_description_raw":
+            val = specs[key]
+            val = re.sub(r'\[.*?\]', '', val).strip()
+            if val:
+                print(f"  {key}: {val}")
+
+    # Also output as JSON for programmatic use
+    output = {k: v for k, v in specs.items() if k != "og_description_raw"}
+    print("\n=== JSON ===")
+    print(json.dumps(output, indent=2))
 
 # ---------------------------------------------------------------------------
 # Price lookup
