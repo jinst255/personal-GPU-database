@@ -14,8 +14,10 @@ You have two tools at your disposal and must use them correctly:
 **Web Search:** Use this to look up pricing and availability for every card. Do not guess prices. For each card, you must make **at least 3 independent search attempts** across different sources before concluding a price is unavailable and writing `null`. Search attempts should vary (e.g. try the product name + "price", then the retailer name directly, then a broader search). Only mark a price as `null` after exhausting these attempts.
 
 **Code Execution:** You must use code execution for **all mathematical operations** without exception. This includes:
-- Calculating `cost_per_gb_vram_usd`
-- Calculating `fp32_per_dollar`
+- Calculating `cost_per_gb_vram_new_usd`
+- Calculating `cost_per_gb_vram_used_usd`
+- Calculating `fp32_per_dollar_new`
+- Calculating `fp32_per_dollar_used`
 - Any unit conversions
 - Any derived or computed column
 
@@ -101,10 +103,13 @@ Use these exact column names in this exact order:
 | `link_amazon` | Direct URL to the product on Amazon; `null` if not listed |
 | `link_bh` | Direct URL to the product on B&H; `null` if not listed |
 | `link_ebay` | Direct URL to eBay search results for this card (used listings); `null` if none |
-| `cost_per_gb_vram_usd` | **Code-calculated**: `price_usd_new_current / vram_gb`; `null` if price unavailable |
-| `fp32_per_dollar` | **Code-calculated**: `fp32_tflops / price_usd_new_current`; `null` if unavailable |
+| `cost_per_gb_vram_new_usd` | **Code-calculated**: `price_usd_new_current / vram_gb`; `null` if new price unavailable |
+| `cost_per_gb_vram_used_usd` | **Code-calculated**: `price_usd_ebay_used / vram_gb`; `null` if used price unavailable |
+| `fp32_per_dollar_new` | **Code-calculated**: `fp32_tflops / price_usd_new_current`; `null` if new price unavailable |
+| `fp32_per_dollar_used` | **Code-calculated**: `fp32_tflops / price_usd_ebay_used`; `null` if used price unavailable |
 | `best_for` | Comma-separated tags: `gaming`, `ai_inference`, `ai_training`, `rendering`, `compute`, `workstation`, `budget`, `mobile`, `server` |
 | `notes` | Free text: discontinued, server-only, requires special cooling, EoL, unified memory, etc. |
+| `last_modified` | Timestamp this row was last updated: `YYYY-MM-DDTHH:MM` in 24-hour format (e.g. `2025-05-06T14:30`). Set to the current timestamp whenever a row is created or any field is changed. |
 
 ---
 
@@ -124,14 +129,17 @@ Every derived numeric value must be computed using code execution. Do not do ari
 
 ```python
 # Run this for each card where both values are available
-price = 399.99
+price_new = 399.99
+price_used = 185.00
 vram_gb = 8
 fp32 = 12.29
 
-cost_per_gb = round(price / vram_gb, 2)
-fp32_per_dollar = round(fp32 / price, 4)
+cost_per_gb_new = round(price_new / vram_gb, 2)
+cost_per_gb_used = round(price_used / vram_gb, 2)
+fp32_per_dollar_new = round(fp32 / price_new, 4)
+fp32_per_dollar_used = round(fp32 / price_used, 4)
 
-print(cost_per_gb, fp32_per_dollar)
+print(cost_per_gb_new, cost_per_gb_used, fp32_per_dollar_new, fp32_per_dollar_used)
 ```
 
 Paste the printed output into the CSV. Never skip this step.
@@ -178,6 +186,22 @@ Do **not** include:
 
 ---
 
+**BATCH WRITE RULES**
+
+When writing or editing the CSV file, you must work in batches of **no more than 15 rows at a time**. This prevents output token limits from interrupting large writes and makes it easier to recover if a batch fails.
+
+Workflow:
+1. Prepare a batch of up to 15 rows using a Python script.
+2. Append the batch to the CSV file.
+3. Verify the batch was written correctly (check row count and field count).
+4. Repeat until all rows are written.
+
+Never attempt to write more than 15 rows in a single file operation.
+
+The same rule applies during research: **save your findings to the CSV at least every 15 entries**. Do not accumulate research data in memory across dozens of cards before writing—write early and write often to avoid losing work if a batch fails or context is lost.
+
+---
+
 **GGPLOT / LETPLOT COMPATIBILITY**
 
 The CSV must load cleanly and support immediate plotting:
@@ -192,8 +216,8 @@ df = pd.read_csv("gpu_database.csv")
 df_ai = df[df["vram_gb"] >= 16]
 ggplot(df_ai, aes(x="price_usd_new_current", y="fp32_tflops", color="category")) + geom_point()
 
-# Example: cheapest cost per GB of VRAM
-df.sort_values("cost_per_gb_vram_usd").head(20)
+# Example: cheapest cost per GB of VRAM (new)
+df.sort_values("cost_per_gb_vram_new_usd").head(20)
 
 # Example: filter to used market deals under $300
 df[df["price_usd_ebay_used"] < 300].sort_values("fp32_tflops", ascending=False)
