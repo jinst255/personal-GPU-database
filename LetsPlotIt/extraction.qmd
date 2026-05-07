@@ -1,0 +1,60 @@
+---
+title: "Data Extraction"
+format: html
+---
+
+
+```{python}
+import polars as pl
+import numpy as np
+from lets_plot import *
+import polars.selectors as cs
+
+LetsPlot.setup_html(isolated_frame=True)
+```
+
+
+```{python}
+df = pl.read_csv(
+	'gpu_database.csv',
+	null_values=['null', 'NULL', 'None', ''],
+	infer_schema_length=10000,
+	schema_overrides={'cuda_cores': pl.Int64}
+)
+``` 
+
+
+```{python}
+df
+
+```
+
+```{python}
+# Filter for used eBay prices, exclude mobile category
+df_plot = df.filter(
+    (pl.col('price_usd_ebay_used').is_not_null()) & 
+    (pl.col('category') != 'mobile')
+).select([
+    'gpu_name', 'vram_gb', 'price_usd_ebay_used'
+])
+
+# Create scatter plot: VRAM vs Used Price, colored by category
+plot = (
+    ggplot(df_plot, aes(x='vram_gb', y='price_usd_ebay_used', color='gpu_name')) +
+    geom_point(size=2.5, alpha=0.7, tooltips=layer_tooltips().title("@gpu_name"), show_legend=False) +
+    
+    
+    scale_x_continuous() +
+    scale_y_continuous() +
+    labs(
+        title='GPU Used Price vs VRAM',
+        x='VRAM (GB)', 
+        y='Used Price - eBay (USD)',
+        color='GPU'
+    ) +
+    theme_minimal()
+)
+plot
+```
+
+
