@@ -1,6 +1,10 @@
 ---
 title: "Data Extraction"
 format: html
+execute:
+  echo: false
+  warning: false
+  message: false
 ---
 
 
@@ -9,6 +13,7 @@ import polars as pl
 import numpy as np
 from lets_plot import *
 import polars.selectors as cs
+
 
 LetsPlot.setup_html(isolated_frame=True)
 ```
@@ -24,9 +29,6 @@ df = pl.read_csv(
 ``` 
 
 
-```{python}
-display(df.columns)
-```
 
 ```{python}
 used_price_by_category = (
@@ -36,11 +38,11 @@ used_price_by_category = (
     .sort('used_price_count', descending=True)
 )
 
-used_price_by_category
+# used_price_by_category
 
 ```
 
-```{python}
+```{python include=false}
 # Filter for used eBay prices, exclude mobile category
 df_plot = df.filter(
     (pl.col('price_usd_ebay_used').is_not_null()) & 
@@ -65,30 +67,36 @@ plot_ready_rows = df_plot.filter(
     (pl.col('price_usd_ebay_used').is_not_null())
 ).height
 
-print(f"Rows with used price (all categories): {used_price_rows}")
-print(f"Rows with used price (non-mobile): {used_price_non_mobile_rows}")
-print(f"Rows eligible for plot (non-null vram/name/price): {plot_ready_rows}")
-if missing_vram_rows > 0 or missing_name_rows > 0:
-    print(
-        f"Rows dropped due to missing data -> vram_gb: {missing_vram_rows}, gpu_name: {missing_name_rows}"
-    )
+# debug prints hidden for clean output
+# print(f"Rows with used price (all categories): {used_price_rows}")
+# print(f"Rows with used price (non-mobile): {used_price_non_mobile_rows}")
+# print(f"Rows eligible for plot (non-null vram/name/price): {plot_ready_rows}")
+# if missing_vram_rows > 0 or missing_name_rows > 0:
+#     print(
+#         f"Rows dropped due to missing data -> vram_gb: {missing_vram_rows}, gpu_name: {missing_name_rows}"
+#     )
 
+```
+
+```{python echo=false}
 # Create scatter plot: VRAM vs Used Price, colored by GPU name
 plot = (
     ggplot(df_plot, aes(x='vram_gb', y='price_usd_ebay_used', color='gpu_name')) +
     geom_point(size=2.5, alpha=0.7, tooltips=layer_tooltips().title("@gpu_name"), show_legend=False) +
 
-    scale_x_continuous() +
-    scale_y_continuous() +
+    scale_x_continuous(limits=[0, 24]) +
+    scale_y_continuous(limits=[0, 900]) +
     labs(
         title='GPU Used Price vs VRAM',
         x='VRAM (GB)', 
         y='Used Price - eBay (USD)',
         color='GPU'
     ) +
-    theme_minimal()
+    theme_gray()
 )
 plot
+
+# save_plot(plot, 'gpu_price_plot.png')  # Then save it
 ```
 
 
