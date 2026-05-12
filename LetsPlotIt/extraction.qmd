@@ -84,8 +84,8 @@ plot = (
     ggplot(df_plot, aes(x='vram_gb', y='price_usd_ebay_used', color='gpu_name')) +
     geom_point(size=2.5, alpha=0.7, tooltips=layer_tooltips().title("@gpu_name"), show_legend=False) +
 
-    scale_x_continuous(limits=[0, 24]) +
-    scale_y_continuous(limits=[0, 900]) +
+    scale_x_continuous(limits=[0, 32]) +
+    scale_y_continuous(limits=[0, 1000]) +
     labs(
         title='GPU Used Price vs VRAM',
         x='VRAM (GB)', 
@@ -99,4 +99,35 @@ plot
 # save_plot(plot, 'gpu_price_plot.png')  # Then save it
 ```
 
+```{python}
+
+# VRAM amount vs VRAM type scatter (colored by GPU name)
+# Exclude noisy or irrelevant VRAM type labels here
+vram_exclude = [
+    'unknown', 'shared', 'HBM?', 'other', 'Unified LPDDR5X', 'Unified LPDDR5', 'Unified LPDDR4X', 'SDRAM', 'SDR', 'DDR', 'DDR2', 'GDDR2', 'GDDR4'
+]
+
+df_vram = df.filter(
+    (pl.col('vram_gb').is_not_null()) &
+    (pl.col('vram_type').is_not_null()) &
+    (~pl.col('vram_type').is_in(vram_exclude)) &
+    (pl.col('category') != 'mobile') &
+    (pl.col('gpu_name').is_not_null())
+).select(['gpu_name', 'vram_gb', 'vram_type'])
+
+plot_vram = (
+    ggplot(df_vram, aes(x='vram_type', y='vram_gb', color='gpu_name')) +
+    geom_jitter(width=0.2, height=0, size=2.5, alpha=0.8, tooltips=layer_tooltips().title("@gpu_name"), show_legend=False) +
+    scale_y_continuous(limits=[4, 128]) +
+    labs(
+        title='GPU VRAM Type and Amount',
+        x='VRAM Type',
+        y='VRAM (GB)'
+    ) +
+    theme_gray()
+)
+plot_vram
+
+
+```
 
